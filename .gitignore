@@ -1,0 +1,29 @@
+# Audio files - ignore sample audio directories
+audios/
+audios2/
+*.mp3
+*.wav
+*.m4a
+*.flac
+
+# Transcription files - ignore generated transcripts
+transcripts/
+transcripts2/
+*.txt
+
+# System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Logs
+*.log

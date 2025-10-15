@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INPUT_DIR="audios2"
+OUTPUT_DIR="transcripts2"
+MODEL="small"
+LANG="es"   # change to "auto" / remove if you want auto-detect
+
+mkdir -p "$OUTPUT_DIR"
+
+# find audio files robustly (handles spaces/newlines)
+find "$INPUT_DIR" -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.flac' \) -print0 |
+while IFS= read -r -d '' file; do
+  filename=$(basename "$file")
+  base="${filename%.*}"
+  echo "▶ Transcribing: $file"
+
+  # Run whisper and preserve its return code & logs
+  if ! python3 -m whisper "$file" --model "$MODEL" --language "$LANG" --output_format txt --output_dir "$OUTPUT_DIR"; then
+    echo "✖ whisper failed for: $file" >&2
+    continue
+  fi
+
+  # Common expected path
+  transcript="$OUTPUT_DIR/$base.txt"
+
+  # If not there, try to find it (some versions/behaviors may output elsewhere)
+  if [ ! -f "$transcript" ]; then
+    transcript=$(find "$OUTPUT_DIR" -maxdepth 1 -type f -iname "${base}*.txt" -print -quit || true)
+  fi
+  if [ -z "$transcript" ]; then
+    transcript=$(find "$(pwd)" -maxdepth 1 -type f -iname "${base}*.txt" -print -quit || true)
+  fi
+
+  if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then
+    echo "⚠ Transcript file not found for $file. Skipping." >&2
+    continue
+  fi
+
+  # Convert to single line: replace newlines with spaces, collapse spaces, trim ends
+  tmp="$OUTPUT_DIR/$base.txt.tmp"
+  tr '\n' ' ' < "$transcript" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' > "$tmp"
+  mv "$tmp" "$OUTPUT_DIR/$base.txt"
+
+  echo "✔ Saved: $OUTPUT_DIR/$base.txt"
+done
+
+echo "All done. Transcripts in: $OUTPUT_DIR"
