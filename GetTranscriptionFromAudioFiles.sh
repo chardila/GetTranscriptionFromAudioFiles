@@ -1,48 +1,381 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INPUT_DIR="audios2"
-OUTPUT_DIR="transcripts2"
-MODEL="small"
-LANG="es"   # change to "auto" / remove if you want auto-detect
+# Default configuration
+DEFAULT_INPUT_DIR="audios"
+DEFAULT_OUTPUT_DIR="transcripts"
+DEFAULT_MODEL="small"
+DEFAULT_LANG="es"
 
-mkdir -p "$OUTPUT_DIR"
+# Initialize variables
+INPUT_DIR="$DEFAULT_INPUT_DIR"
+OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
+MODEL="$DEFAULT_MODEL"
+LANG="$DEFAULT_LANG"
+VERBOSE=false
+VALIDATE_MIME=true
 
-# find audio files robustly (handles spaces/newlines)
-find "$INPUT_DIR" -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.flac' \) -print0 |
-while IFS= read -r -d '' file; do
-  filename=$(basename "$file")
-  base="${filename%.*}"
-  echo "▶ Transcribing: $file"
+# Temporary files tracking for cleanup
+declare -a TEMP_FILES=()
 
-  # Run whisper and preserve its return code & logs
-  if ! python3 -m whisper "$file" --model "$MODEL" --language "$LANG" --output_format txt --output_dir "$OUTPUT_DIR"; then
-    echo "✖ whisper failed for: $file" >&2
-    continue
-  fi
+# Colors for output
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m' # No Color
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    NC=''
+fi
 
-  # Common expected path
-  transcript="$OUTPUT_DIR/$base.txt"
+# Usage function
+show_help() {
+    cat << EOF
+Usage: $0 [OPTIONS]
 
-  # If not there, try to find it (some versions/behaviors may output elsewhere)
-  if [ ! -f "$transcript" ]; then
-    transcript=$(find "$OUTPUT_DIR" -maxdepth 1 -type f -iname "${base}*.txt" -print -quit || true)
-  fi
-  if [ -z "$transcript" ]; then
-    transcript=$(find "$(pwd)" -maxdepth 1 -type f -iname "${base}*.txt" -print -quit || true)
-  fi
+Batch transcribe audio files using OpenAI Whisper
 
-  if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then
-    echo "⚠ Transcript file not found for $file. Skipping." >&2
-    continue
-  fi
+OPTIONS:
+    -i, --input DIR     Input directory containing audio files (default: $DEFAULT_INPUT_DIR)
+    -o, --output DIR    Output directory for transcripts (default: $DEFAULT_OUTPUT_DIR)
+    -m, --model MODEL   Whisper model: tiny|base|small|medium|large (default: $DEFAULT_MODEL)
+    -l, --lang LANG     Language code (e.g., en, es, fr) or 'auto' (default: $DEFAULT_LANG)
+    -v, --verbose       Enable verbose output
+    --no-mime-check     Skip MIME type validation of audio files
+    -h, --help          Show this help message
 
-  # Convert to single line: replace newlines with spaces, collapse spaces, trim ends
-  tmp="$OUTPUT_DIR/$base.txt.tmp"
-  tr '\n' ' ' < "$transcript" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' > "$tmp"
-  mv "$tmp" "$OUTPUT_DIR/$base.txt"
+EXAMPLES:
+    $0                                    # Use default settings
+    $0 -i recordings -o texts -m medium   # Custom directories and model
+    $0 -l auto -v                         # Auto-detect language with verbose output
+    $0 --input "My Audio Files"           # Handle directories with spaces
 
-  echo "✔ Saved: $OUTPUT_DIR/$base.txt"
-done
+SUPPORTED AUDIO FORMATS:
+    MP3, WAV, M4A, FLAC
 
-echo "All done. Transcripts in: $OUTPUT_DIR"
+For more information, see the README.md file.
+EOF
+}
+
+# Logging functions
+log_info() {
+    echo -e "${BLUE}ℹ${NC} $*"
+}
+
+log_success() {
+    echo -e "${GREEN}✔${NC} $*"
+}
+
+log_warning() {
+    echo -e "${YELLOW}⚠${NC} $*" >&2
+}
+
+log_error() {
+    echo -e "${RED}✖${NC} $*" >&2
+}
+
+log_verbose() {
+    if [[ "$VERBOSE" == true ]]; then
+        echo -e "${BLUE}[VERBOSE]${NC} $*" >&2
+    fi
+}
+
+# Cleanup function
+cleanup() {
+    local exit_code=$?
+    log_verbose "Cleaning up temporary files..."
+    for temp_file in "${TEMP_FILES[@]}"; do
+        if [[ -f "$temp_file" ]]; then
+            rm -f "$temp_file"
+            log_verbose "Removed temporary file: $temp_file"
+        fi
+    done
+    if [[ $exit_code -ne 0 ]]; then
+        log_warning "Script interrupted or failed (exit code: $exit_code)"
+    fi
+    exit $exit_code
+}
+
+# Set up cleanup trap
+trap cleanup EXIT INT TERM
+
+# Validate dependencies
+validate_dependencies() {
+    log_verbose "Validating dependencies..."
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "python3 is not installed or not in PATH"
+        log_error "Please install Python 3: https://python.org"
+        exit 1
+    fi
+
+    log_verbose "Found python3: $(which python3)"
+
+    if ! python3 -c "import whisper" 2>/dev/null; then
+        log_error "OpenAI Whisper is not installed"
+        log_error "Please install it with: pip install openai-whisper"
+        exit 1
+    fi
+
+    log_verbose "OpenAI Whisper is available"
+
+    if [[ "$VALIDATE_MIME" == true ]] && ! command -v file >/dev/null 2>&1; then
+        log_warning "file command not available, skipping MIME type validation"
+        VALIDATE_MIME=false
+    fi
+
+    log_success "All dependencies validated"
+}
+
+# Validate audio file using MIME type
+validate_audio_file() {
+    local file="$1"
+
+    if [[ "$VALIDATE_MIME" != true ]]; then
+        return 0
+    fi
+
+    local mime_type
+    mime_type=$(file --mime-type -b "$file" 2>/dev/null || echo "unknown")
+
+    case "$mime_type" in
+        audio/mpeg|audio/mp3|audio/wav|audio/x-wav|audio/wave|audio/x-m4a|audio/m4a|audio/flac|audio/x-flac)
+            log_verbose "Validated audio file: $file (MIME: $mime_type)"
+            return 0
+            ;;
+        *)
+            log_warning "File may not be valid audio: $file (detected MIME: $mime_type)"
+            log_warning "Proceeding anyway, but transcription may fail"
+            return 1
+            ;;
+    esac
+}
+
+# Parse command line arguments
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -i|--input)
+                INPUT_DIR="$2"
+                shift 2
+                ;;
+            -o|--output)
+                OUTPUT_DIR="$2"
+                shift 2
+                ;;
+            -m|--model)
+                MODEL="$2"
+                shift 2
+                ;;
+            -l|--lang)
+                LANG="$2"
+                shift 2
+                ;;
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            --no-mime-check)
+                VALIDATE_MIME=false
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Use -h or --help for usage information"
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# Validate configuration
+validate_config() {
+    log_verbose "Validating configuration..."
+
+    # Check input directory
+    if [[ ! -d "$INPUT_DIR" ]]; then
+        log_error "Input directory does not exist: $INPUT_DIR"
+        log_error "Please create the directory and add audio files, or specify a different path with -i"
+        exit 1
+    fi
+
+    # Check if input directory has audio files
+    local audio_count
+    audio_count=$(find "$INPUT_DIR" -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.flac' \) | wc -l)
+
+    if [[ $audio_count -eq 0 ]]; then
+        log_error "No audio files found in: $INPUT_DIR"
+        log_error "Supported formats: MP3, WAV, M4A, FLAC"
+        exit 1
+    fi
+
+    log_verbose "Found $audio_count audio files in input directory"
+
+    # Validate model
+    case "$MODEL" in
+        tiny|base|small|medium|large)
+            log_verbose "Using Whisper model: $MODEL"
+            ;;
+        *)
+            log_error "Invalid model: $MODEL"
+            log_error "Supported models: tiny, base, small, medium, large"
+            exit 1
+            ;;
+    esac
+
+    # Create output directory
+    if ! mkdir -p "$OUTPUT_DIR"; then
+        log_error "Failed to create output directory: $OUTPUT_DIR"
+        exit 1
+    fi
+
+    log_verbose "Output directory ready: $OUTPUT_DIR"
+    log_success "Configuration validated"
+}
+
+# Process a single audio file
+process_audio_file() {
+    local file="$1"
+    local current="$2"
+    local total="$3"
+
+    local filename
+    filename=$(basename "$file")
+    local base="${filename%.*}"
+
+    log_info "[$current/$total] Processing: $filename"
+
+    # Validate audio file if MIME checking is enabled
+    validate_audio_file "$file"
+
+    # Prepare whisper command
+    local whisper_cmd=(
+        "python3" "-m" "whisper" "$file"
+        "--model" "$MODEL"
+        "--output_format" "txt"
+        "--output_dir" "$OUTPUT_DIR"
+    )
+
+    # Add language parameter if not auto
+    if [[ "$LANG" != "auto" ]]; then
+        whisper_cmd+=("--language" "$LANG")
+    fi
+
+    log_verbose "Running: ${whisper_cmd[*]}"
+
+    # Run whisper with error handling
+    if ! "${whisper_cmd[@]}" 2>&1; then
+        log_error "Whisper failed for: $file"
+        log_error "This could be due to:"
+        log_error "  - Corrupted or unsupported audio file"
+        log_error "  - Insufficient memory for the model"
+        log_error "  - Network issues (if downloading model)"
+        return 1
+    fi
+
+    # Find the generated transcript
+    local transcript="$OUTPUT_DIR/$base.txt"
+
+    # Try alternative locations if not found
+    if [[ ! -f "$transcript" ]]; then
+        log_verbose "Transcript not found at expected location, searching..."
+        transcript=$(find "$OUTPUT_DIR" -maxdepth 1 -type f -iname "${base}*.txt" -print -quit 2>/dev/null || echo "")
+    fi
+
+    if [[ -z "$transcript" ]] || [[ ! -f "$transcript" ]]; then
+        log_error "Generated transcript file not found for: $file"
+        log_error "Expected location: $OUTPUT_DIR/$base.txt"
+        return 1
+    fi
+
+    log_verbose "Found transcript: $transcript"
+
+    # Process transcript to single line format
+    local temp_file
+    temp_file=$(mktemp "$OUTPUT_DIR/${base}.txt.XXXXXX")
+    TEMP_FILES+=("$temp_file")
+
+    if tr '\n' ' ' < "$transcript" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' > "$temp_file"; then
+        if mv "$temp_file" "$OUTPUT_DIR/$base.txt"; then
+            # Remove from cleanup array since we successfully moved it
+            TEMP_FILES=("${TEMP_FILES[@]/$temp_file}")
+            log_success "Saved: $OUTPUT_DIR/$base.txt"
+            return 0
+        else
+            log_error "Failed to move processed transcript to final location"
+            return 1
+        fi
+    else
+        log_error "Failed to process transcript text"
+        return 1
+    fi
+}
+
+# Main processing function
+main() {
+    echo "🎤 Audio Transcription Tool with OpenAI Whisper"
+    echo "================================================="
+
+    # Parse command line arguments
+    parse_args "$@"
+
+    # Validate dependencies and configuration
+    validate_dependencies
+    validate_config
+
+    # Show configuration
+    log_info "Configuration:"
+    log_info "  Input directory:  $INPUT_DIR"
+    log_info "  Output directory: $OUTPUT_DIR"
+    log_info "  Whisper model:    $MODEL"
+    log_info "  Language:         $LANG"
+    log_info "  MIME validation:  $VALIDATE_MIME"
+    echo
+
+    # Count total files for progress tracking
+    local total_files
+    total_files=$(find "$INPUT_DIR" -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.flac' \) | wc -l)
+
+    log_info "Processing $total_files audio files..."
+    echo
+
+    # Process files
+    local processed=0
+    local failed=0
+    local current=0
+
+    while IFS= read -r -d '' file; do
+        ((current++))
+        if process_audio_file "$file" "$current" "$total_files"; then
+            ((processed++))
+        else
+            ((failed++))
+        fi
+        echo
+    done < <(find "$INPUT_DIR" -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.flac' \) -print0)
+
+    # Summary
+    echo "================================================="
+    log_success "Processing complete!"
+    log_info "Successfully processed: $processed files"
+    if [[ $failed -gt 0 ]]; then
+        log_warning "Failed to process: $failed files"
+    fi
+    log_info "Transcripts saved in: $OUTPUT_DIR"
+
+    if [[ $failed -gt 0 ]]; then
+        exit 1
+    fi
+}
+
+# Run main function with all arguments
+main "$@"
