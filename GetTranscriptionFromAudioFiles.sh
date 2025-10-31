@@ -38,7 +38,7 @@ show_help() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-Batch transcribe audio files using OpenAI Whisper
+Batch transcribe audio files using faster-whisper
 
 OPTIONS:
     -i, --input DIR     Input directory containing audio files (default: $DEFAULT_INPUT_DIR)
@@ -116,13 +116,13 @@ validate_dependencies() {
 
     log_verbose "Found python3: $(which python3)"
 
-    if ! python3 -c "import whisper" 2>/dev/null; then
-        log_error "OpenAI Whisper is not installed"
-        log_error "Please install it with: pip install openai-whisper"
+    if ! python3 -c "import faster_whisper" 2>/dev/null; then
+        log_error "faster-whisper is not installed"
+        log_error "Please install it with: pip install faster-whisper"
         exit 1
     fi
 
-    log_verbose "OpenAI Whisper is available"
+    log_verbose "faster-whisper is available"
 
     if [[ "$VALIDATE_MIME" == true ]] && ! command -v file >/dev/null 2>&1; then
         log_warning "file command not available, skipping MIME type validation"
@@ -257,11 +257,15 @@ process_audio_file() {
     # Validate audio file if MIME checking is enabled
     validate_audio_file "$file"
 
-    # Prepare whisper command
+    # Get the directory where this script is located
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    # Prepare whisper command using faster-whisper Python script
     local whisper_cmd=(
-        "python3" "-m" "whisper" "$file"
+        "python3" "$script_dir/transcribe_faster_whisper.py"
+        "$file"
         "--model" "$MODEL"
-        "--output_format" "txt"
         "--output_dir" "$OUTPUT_DIR"
     )
 
@@ -273,7 +277,7 @@ process_audio_file() {
     log_verbose "Running: ${whisper_cmd[*]}"
 
     # Run whisper with error handling
-    if ! "${whisper_cmd[@]}" 2>&1; then
+    if ! "${whisper_cmd[@]}" 2>&1 | tee /tmp/whisper_output.log; then
         log_error "Whisper failed for: $file"
         log_error "This could be due to:"
         log_error "  - Corrupted or unsupported audio file"
@@ -322,7 +326,7 @@ process_audio_file() {
 
 # Main processing function
 main() {
-    echo "🎤 Audio Transcription Tool with OpenAI Whisper"
+    echo "🎤 Audio Transcription Tool with faster-whisper"
     echo "================================================="
 
     # Parse command line arguments
@@ -353,15 +357,18 @@ main() {
     local failed=0
     local current=0
 
+    log_verbose "Starting file processing loop..."
     while IFS= read -r -d '' file; do
-        ((current++))
+        ((current++)) || true
+        log_verbose "Found file: $file"
         if process_audio_file "$file" "$current" "$total_files"; then
-            ((processed++))
+            ((processed++)) || true
         else
-            ((failed++))
+            ((failed++)) || true
         fi
         echo
     done < <(find "$INPUT_DIR" -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.flac' \) -print0)
+    log_verbose "Finished file processing loop"
 
     # Summary
     echo "================================================="
