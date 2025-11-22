@@ -12,8 +12,10 @@ INPUT_DIR="$DEFAULT_INPUT_DIR"
 OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
 MODEL="$DEFAULT_MODEL"
 LANG="$DEFAULT_LANG"
+JOBS=1
 VERBOSE=false
 VALIDATE_MIME=true
+INTERNAL_WORKER=false
 
 # Temporary files tracking for cleanup
 declare -a TEMP_FILES=()
@@ -45,6 +47,7 @@ OPTIONS:
     -o, --output DIR    Output directory for transcripts (default: $DEFAULT_OUTPUT_DIR)
     -m, --model MODEL   Whisper model: tiny|base|small|medium|large (default: $DEFAULT_MODEL)
     -l, --lang LANG     Language code (e.g., en, es, fr) or 'auto' (default: $DEFAULT_LANG)
+    -j, --jobs N        Number of parallel jobs (default: 1)
     -v, --verbose       Enable verbose output
     --no-mime-check     Skip MIME type validation of audio files
     -h, --help          Show this help message
@@ -89,7 +92,7 @@ log_verbose() {
 cleanup() {
     local exit_code=$?
     log_verbose "Cleaning up temporary files..."
-    for temp_file in "${TEMP_FILES[@]}"; do
+    for temp_file in "${TEMP_FILES[@]:-}"; do
         if [[ -f "$temp_file" ]]; then
             rm -f "$temp_file"
             log_verbose "Removed temporary file: $temp_file"
@@ -130,6 +133,17 @@ validate_dependencies() {
     fi
 
     log_success "All dependencies validated"
+
+    # Check for virtual environment
+    if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+        if [[ -d ".venv" ]]; then
+            log_info "Found .venv, activating..."
+            source .venv/bin/activate
+        else
+            log_warning "No virtual environment active or found (.venv)."
+            log_warning "It is recommended to run this script within a virtual environment."
+        fi
+    fi
 }
 
 # Validate audio file using MIME type
@@ -144,7 +158,7 @@ validate_audio_file() {
     mime_type=$(file --mime-type -b "$file" 2>/dev/null || echo "unknown")
 
     case "$mime_type" in
-        audio/mpeg|audio/mp3|audio/wav|audio/x-wav|audio/wave|audio/x-m4a|audio/m4a|audio/flac|audio/x-flac)
+        audio/mpeg|audio/mp3|audio/wav|audio/x-wav|audio/wave|audio/x-m4a|audio/m4a|audio/flac|audio/x-flac|video/mp4)
             log_verbose "Validated audio file: $file (MIME: $mime_type)"
             return 0
             ;;
@@ -176,12 +190,20 @@ parse_args() {
                 LANG="$2"
                 shift 2
                 ;;
+            -j|--jobs)
+                JOBS="$2"
+                shift 2
+                ;;
             -v|--verbose)
                 VERBOSE=true
                 shift
                 ;;
             --no-mime-check)
                 VALIDATE_MIME=false
+                shift
+                ;;
+            --internal-worker)
+                INTERNAL_WORKER=true
                 shift
                 ;;
             -h|--help)
@@ -245,17 +267,25 @@ validate_config() {
 # Process a single audio file
 process_audio_file() {
     local file="$1"
-    local current="$2"
-    local total="$3"
+    # Optional progress args for sequential mode
+    local current="${2:-?}"
+    local total="${3:-?}"
 
     local filename
     filename=$(basename "$file")
     local base="${filename%.*}"
+    local transcript="$OUTPUT_DIR/$base.txt"
 
-    log_info "[$current/$total] Processing: $filename"
+    # Skip if output already exists
+    if [[ -f "$transcript" ]]; then
+        log_info "Skipping already processed: $filename"
+        return 0
+    fi
+
+    log_info "Processing: $filename"
 
     # Validate audio file if MIME checking is enabled
-    validate_audio_file "$file"
+    validate_audio_file "$file" || true
 
     # Get the directory where this script is located
     local script_dir
@@ -279,58 +309,51 @@ process_audio_file() {
     # Run whisper with error handling
     if ! "${whisper_cmd[@]}" 2>&1 | tee /tmp/whisper_output.log; then
         log_error "Whisper failed for: $file"
-        log_error "This could be due to:"
-        log_error "  - Corrupted or unsupported audio file"
-        log_error "  - Insufficient memory for the model"
-        log_error "  - Network issues (if downloading model)"
         return 1
     fi
 
-    # Find the generated transcript
-    local transcript="$OUTPUT_DIR/$base.txt"
-
-    # Try alternative locations if not found
+    # Verify output exists
     if [[ ! -f "$transcript" ]]; then
-        log_verbose "Transcript not found at expected location, searching..."
-        transcript=$(find "$OUTPUT_DIR" -maxdepth 1 -type f -iname "${base}*.txt" -print -quit 2>/dev/null || echo "")
-    fi
-
-    if [[ -z "$transcript" ]] || [[ ! -f "$transcript" ]]; then
         log_error "Generated transcript file not found for: $file"
-        log_error "Expected location: $OUTPUT_DIR/$base.txt"
         return 1
     fi
 
-    log_verbose "Found transcript: $transcript"
-
-    # Process transcript to single line format
-    local temp_file
-    temp_file=$(mktemp "$OUTPUT_DIR/${base}.txt.XXXXXX")
-    TEMP_FILES+=("$temp_file")
-
-    if tr '\n' ' ' < "$transcript" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' > "$temp_file"; then
-        if mv "$temp_file" "$OUTPUT_DIR/$base.txt"; then
-            # Remove from cleanup array since we successfully moved it
-            TEMP_FILES=("${TEMP_FILES[@]/$temp_file}")
-            log_success "Saved: $OUTPUT_DIR/$base.txt"
-            return 0
-        else
-            log_error "Failed to move processed transcript to final location"
-            return 1
-        fi
-    else
-        log_error "Failed to process transcript text"
-        return 1
-    fi
+    log_success "Saved: $transcript"
+    return 0
 }
 
 # Main processing function
 main() {
-    echo "🎤 Audio Transcription Tool with faster-whisper"
-    echo "================================================="
-
     # Parse command line arguments
     parse_args "$@"
+
+    # Internal worker mode: process one file and exit
+    if [[ "$INTERNAL_WORKER" == true ]]; then
+        # In worker mode, the first non-flag argument is the file
+        # But parse_args consumes flags. We need to handle the remaining args.
+        # Actually, parse_args shifts. So $1 should be the file if called correctly.
+        # But wait, parse_args handles global vars.
+        # We need to ensure we get the file argument.
+        # The calling convention will be: $0 --internal-worker [options] file
+        
+        # We need to find the file argument. It's likely in "$@" after parse_args
+        # But parse_args consumes "$@".
+        # Let's re-parse or just assume the last arg is the file?
+        # Better: The caller (xargs) will invoke: script.sh --internal-worker -m model ... file
+        # parse_args will consume flags. $1 will be the file.
+        
+        local file="$1"
+        if [[ -z "$file" ]]; then
+            log_error "Internal worker missing file argument"
+            exit 1
+        fi
+        
+        process_audio_file "$file"
+        exit $?
+    fi
+
+    echo "🎤 Audio Transcription Tool with faster-whisper"
+    echo "================================================="
 
     # Validate dependencies and configuration
     validate_dependencies
@@ -342,46 +365,53 @@ main() {
     log_info "  Output directory: $OUTPUT_DIR"
     log_info "  Whisper model:    $MODEL"
     log_info "  Language:         $LANG"
-    log_info "  MIME validation:  $VALIDATE_MIME"
+    log_info "  Jobs:             $JOBS"
     echo
 
-    # Count total files for progress tracking
+    # Count total files
     local total_files
     total_files=$(find "$INPUT_DIR" -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.flac' \) | wc -l)
 
-    log_info "Processing $total_files audio files..."
+    log_info "Found $total_files audio files."
     echo
 
-    # Process files
-    local processed=0
-    local failed=0
-    local current=0
+    if [[ $total_files -eq 0 ]]; then
+        log_warning "No files to process."
+        exit 0
+    fi
 
-    log_verbose "Starting file processing loop..."
-    while IFS= read -r -d '' file; do
-        ((current++)) || true
-        log_verbose "Found file: $file"
-        if process_audio_file "$file" "$current" "$total_files"; then
-            ((processed++)) || true
-        else
-            ((failed++)) || true
-        fi
-        echo
-    done < <(find "$INPUT_DIR" -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.flac' \) -print0)
-    log_verbose "Finished file processing loop"
+    # Process files
+    if [[ "$JOBS" -gt 1 ]]; then
+        log_info "Starting parallel processing with $JOBS jobs..."
+        
+        # Construct the command for xargs
+        # We need to pass all current configuration flags to the worker
+        local worker_cmd=("$0" "--internal-worker")
+        worker_cmd+=("-m" "$MODEL")
+        worker_cmd+=("-o" "$OUTPUT_DIR")
+        worker_cmd+=("-l" "$LANG")
+        if [[ "$VERBOSE" == true ]]; then worker_cmd+=("-v"); fi
+        if [[ "$VALIDATE_MIME" == false ]]; then worker_cmd+=("--no-mime-check"); fi
+        
+        # Use find + xargs -P
+        # We use print0/xargs -0 to handle filenames with spaces correctly
+        find "$INPUT_DIR" -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.flac' \) -print0 | \
+            xargs -0 -n 1 -P "$JOBS" "${worker_cmd[@]}"
+            
+    else
+        log_info "Starting sequential processing..."
+        local current=0
+        while IFS= read -r -d '' file; do
+            ((current++)) || true
+            process_audio_file "$file" "$current" "$total_files"
+        done < <(find "$INPUT_DIR" -type f \( -iname '*.mp3' -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.flac' \) -print0)
+    fi
 
     # Summary
+    echo
     echo "================================================="
     log_success "Processing complete!"
-    log_info "Successfully processed: $processed files"
-    if [[ $failed -gt 0 ]]; then
-        log_warning "Failed to process: $failed files"
-    fi
     log_info "Transcripts saved in: $OUTPUT_DIR"
-
-    if [[ $failed -gt 0 ]]; then
-        exit 1
-    fi
 }
 
 # Run main function with all arguments

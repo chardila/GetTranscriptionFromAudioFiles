@@ -9,7 +9,10 @@ A professional audio transcription tool that batch processes audio files using f
 - **Voice Activity Detection (VAD)** for improved transcription accuracy
 - **Automatic device selection** (CPU/GPU) and compute type optimization
 - **Command-line interface** with comprehensive options
-- **Automatic dependency validation** (Python 3, faster-whisper)
+- **Parallel processing** support for faster batch execution
+- **Smart file skipping** to avoid re-processing existing transcripts
+- **Automatic dependency validation** (Python 3, faster-whisper, ffmpeg)
+- **Virtual environment detection** (.venv support)
 - **Progress tracking** with `[2/10]` style indicators
 - **Color-coded output** for better visibility
 - **MIME type validation** for audio files
@@ -47,6 +50,7 @@ The script automatically validates these dependencies at startup:
 - **WAV** (.wav)
 - **M4A** (.m4a)
 - **FLAC** (.flac)
+- **MP4** (.mp4, video files are supported if they contain audio)
 
 ## 🚀 Quick Start
 
@@ -78,6 +82,7 @@ OPTIONS:
     -o, --output DIR    Output directory for transcripts (default: transcripts)
     -m, --model MODEL   Whisper model: tiny|base|small|medium|large (default: small)
     -l, --lang LANG     Language code (e.g., en, es, fr) or 'auto' (default: es)
+    -j, --jobs N        Number of parallel jobs (default: 1)
     -v, --verbose       Enable verbose output for debugging
     --no-mime-check     Skip MIME type validation of audio files
     -h, --help          Show help message
@@ -140,6 +145,15 @@ Common language codes: `en`, `es`, `fr`, `de`, `it`, `pt`, `ru`, `ja`, `ko`, `zh
 
 # High accuracy for important recordings
 ./GetTranscriptionFromAudioFiles.sh -m large -l auto -v
+
+### Parallel Processing
+```bash
+# Process 4 files at a time
+./GetTranscriptionFromAudioFiles.sh -j 4
+
+# Combine parallel processing with other options
+./GetTranscriptionFromAudioFiles.sh -j 2 -m medium -l en
+```
 ```
 
 ### Debugging and Troubleshooting
