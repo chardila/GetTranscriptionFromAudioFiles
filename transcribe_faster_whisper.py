@@ -65,14 +65,22 @@ def transcribe_audio(
             transcript_text.append(segment.text.strip())
 
         # Join all segments
-        full_transcript = " ".join(transcript_text)
-
+        # Join all segments into a single line
+        full_transcript = " ".join(transcript_text).replace("\n", " ").strip()
+        
         # Prepare output file path
         audio_path = Path(audio_file)
         output_path = Path(output_dir) / f"{audio_path.stem}.txt"
-
-        # Save transcript
-        output_path.write_text(full_transcript, encoding='utf-8')
+        
+        # Atomic write: write to temp file then rename
+        temp_path = output_path.with_suffix(".tmp")
+        try:
+            temp_path.write_text(full_transcript, encoding='utf-8')
+            temp_path.replace(output_path)
+        except Exception as e:
+            if temp_path.exists():
+                temp_path.unlink()
+            raise e
 
         print(f"Detected language: {info.language} (probability: {info.language_probability:.2f})", file=sys.stderr)
         print(f"Transcript saved to: {output_path}", file=sys.stderr)
