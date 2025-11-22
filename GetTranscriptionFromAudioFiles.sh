@@ -158,7 +158,7 @@ validate_audio_file() {
     mime_type=$(file --mime-type -b "$file" 2>/dev/null || echo "unknown")
 
     case "$mime_type" in
-        audio/mpeg|audio/mp3|audio/wav|audio/x-wav|audio/wave|audio/x-m4a|audio/m4a|audio/flac|audio/x-flac)
+        audio/mpeg|audio/mp3|audio/wav|audio/x-wav|audio/wave|audio/x-m4a|audio/m4a|audio/flac|audio/x-flac|video/mp4)
             log_verbose "Validated audio file: $file (MIME: $mime_type)"
             return 0
             ;;
@@ -285,7 +285,7 @@ process_audio_file() {
     log_info "Processing: $filename"
 
     # Validate audio file if MIME checking is enabled
-    validate_audio_file "$file"
+    validate_audio_file "$file" || true
 
     # Get the directory where this script is located
     local script_dir
